@@ -1,7 +1,11 @@
 from typing import TypeVar, Type, Generic, Any, Callable, Union, Optional
 from pydantic import BaseModel, ValidationError
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+import asyncio
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar('T', bound=BaseModel)
 
@@ -92,6 +96,10 @@ class Agent(Generic[T]):
         response_model: Pydantic model for structured output validation.
     """
 
+    TIMEOUT_SECONDS = 1200  # 20 minutes
+    MAX_RETRIES = 3
+    INITIAL_BACKOFF = 30  # seconds
+
     def __init__(self, options: OptionsProvider, response_model: Type[T]):
         self._options = options
         self.response_model = response_model
@@ -102,40 +110,66 @@ class Agent(Generic[T]):
             return self._options()
         return self._options
 
-    async def run(self, query: str) -> AgentTrace[T]:
+    async def _execute_query(self, query: str) -> list[Any]:
+        """Execute a single query attempt."""
         async with ClaudeSDKClient(self._get_options()) as client:
             await client.query(query)
-            messages = [msg async for msg in client.receive_response()]
+            return [msg async for msg in client.receive_response()]
 
-            first = messages[0]
-            last = messages[-1]
+    async def _run_with_retry(self, query: str) -> list[Any]:
+        """Execute query with timeout and exponential backoff retry."""
+        last_error: Exception | None = None
+        backoff = self.INITIAL_BACKOFF
 
-            # Try to parse structured output, gracefully handle failures
-            output = None
-            parse_error = None
-            raw_structured_output = last.structured_output
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                async with asyncio.timeout(self.TIMEOUT_SECONDS):
+                    return await self._execute_query(query)
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"Query timed out after {self.TIMEOUT_SECONDS}s")
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES} timed out. Retrying in {backoff}s...")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}. Retrying in {backoff}s...")
 
-            if raw_structured_output is not None:
-                try:
-                    output = self.response_model.model_validate(raw_structured_output)
-                except (ValidationError, json.JSONDecodeError, TypeError) as e:
-                    parse_error = f"{type(e).__name__}: {str(e)}"
-            else:
-                parse_error = "No structured output returned (context limit likely exceeded)"
+            if attempt < self.MAX_RETRIES - 1:
+                await asyncio.sleep(backoff)
+                backoff *= 2  # Exponential backoff
 
-            return AgentTrace(
-                uuid=first.data.get('uuid'),
-                session_id=last.session_id,
-                model=first.data.get('model'),
-                tools=first.data.get('tools', []),
-                duration_ms=last.duration_ms,
-                total_cost_usd=last.total_cost_usd,
-                num_turns=last.num_turns,
-                usage=last.usage,
-                result=last.result,
-                is_error=last.is_error or parse_error is not None,
-                output=output,
-                parse_error=parse_error,
-                raw_structured_output=raw_structured_output,
-                messages=messages,
-            )
+        raise last_error  # Re-raise after all retries exhausted
+
+    async def run(self, query: str) -> AgentTrace[T]:
+        messages = await self._run_with_retry(query)
+
+        first = messages[0]
+        last = messages[-1]
+
+        # Try to parse structured output, gracefully handle failures
+        output = None
+        parse_error = None
+        raw_structured_output = last.structured_output
+
+        if raw_structured_output is not None:
+            try:
+                output = self.response_model.model_validate(raw_structured_output)
+            except (ValidationError, json.JSONDecodeError, TypeError) as e:
+                parse_error = f"{type(e).__name__}: {str(e)}"
+        else:
+            parse_error = "No structured output returned (context limit likely exceeded)"
+
+        return AgentTrace(
+            uuid=first.data.get('uuid'),
+            session_id=last.session_id,
+            model=first.data.get('model'),
+            tools=first.data.get('tools', []),
+            duration_ms=last.duration_ms,
+            total_cost_usd=last.total_cost_usd,
+            num_turns=last.num_turns,
+            usage=last.usage,
+            result=last.result,
+            is_error=last.is_error or parse_error is not None,
+            output=output,
+            parse_error=parse_error,
+            raw_structured_output=raw_structured_output,
+            messages=messages,
+        )

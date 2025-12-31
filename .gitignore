@@ -21,3 +21,4 @@ results/
 
 # Cache
 .cache/
+output.txt

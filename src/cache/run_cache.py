@@ -1,15 +1,18 @@
 """
 Program-aware run caching for agent evaluations.
 
-Cache invalidates automatically when .claude/ directory content changes
-(skills, prompts, config). Uses git tree hash for content-based caching.
+Cache invalidates automatically when behavior-affecting files change:
+- .claude/skills/** (skill definitions)
+- src/agent_profiles/base_agent/prompt.txt (prompt text)
+
+Excludes metadata files like .claude/program.yaml to avoid unnecessary
+cache invalidation when only scores or timestamps change.
 """
 
 import hashlib
 import json
 import logging
 import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -50,8 +53,9 @@ class RunCache:
     """
     Program-aware cache for agent run results.
 
-    Keys on hash(.claude/ tree) + hash(question) to automatically
-    invalidate when any content in .claude/ changes (skills, prompts, config).
+    Keys on hash(behavior-affecting files) + hash(question) to automatically
+    invalidate when skills or prompts change. Ignores metadata changes
+    (scores, timestamps) to avoid unnecessary cache invalidation.
 
     Usage:
         cache = RunCache()
@@ -80,76 +84,52 @@ class RunCache:
 
     def _get_tree_hash(self) -> str:
         """
-        Get combined tree hash of .claude/ and prompt directories via git.
+        Get combined hash of files that affect agent behavior.
 
-        This is content-based - identical content = identical hash,
-        regardless of which branch/commit. Captures both skills/config
-        in .claude/ and prompt text in src/agent_profiles/base_agent/.
+        Only hashes files that actually affect agent behavior:
+        - .claude/skills/** - skill definitions
+        - src/agent_profiles/base_agent/prompt.txt - prompt text
 
-        First tries to get hash from HEAD (committed state), but falls back
-        to computing hash from working directory if paths don't exist in HEAD.
+        Excludes metadata files like .claude/program.yaml which contain
+        mutable fields (score, created_at) that don't affect behavior.
 
         Returns:
-            Combined hash of both directory trees.
-
-        Raises:
-            RuntimeError: If git command fails and fallback also fails.
+            Combined hash of behavior-affecting files.
         """
-        paths = [
-            ".claude/",
-            "src/agent_profiles/base_agent/",
+        # Define paths that affect agent behavior
+        # (directory, glob_pattern) tuples
+        behavior_paths = [
+            (".claude/skills", "**/*"),  # All skill files
+            ("src/agent_profiles/base_agent", "prompt.txt"),  # Prompt text
         ]
 
-        tree_hashes = []
-        use_working_dir = False
-        
-        # Try to get tree hashes from HEAD first
-        for path in paths:
-            try:
-                result = subprocess.run(
-                    ["git", "rev-parse", f"HEAD:{path}"],
-                    cwd=self.config.cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                tree_hashes.append(result.stdout.strip())
-            except subprocess.CalledProcessError:
-                # Path doesn't exist in HEAD, will use working directory fallback
-                use_working_dir = True
-                break
+        content_hashes = []
+        for base_dir, pattern in behavior_paths:
+            dir_path = self.config.cwd / base_dir
+            if dir_path.exists():
+                content_hashes.append(self._hash_files(dir_path, pattern))
+            else:
+                content_hashes.append("")
 
-        # If paths don't exist in HEAD, compute hash from working directory
-        if use_working_dir:
-            tree_hashes = []
-            for path in paths:
-                dir_path = self.config.cwd / path
-                if dir_path.exists():
-                    # Compute hash of directory contents
-                    dir_hash = self._hash_directory(dir_path)
-                    tree_hashes.append(dir_hash)
-                else:
-                    # Empty hash for non-existent directory
-                    tree_hashes.append("")
-
-        # Combine tree hashes into a single hash
-        combined = ":".join(tree_hashes)
+        # Combine hashes into a single hash
+        combined = ":".join(content_hashes)
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
-    def _hash_directory(self, dir_path: Path) -> str:
+    def _hash_files(self, dir_path: Path, pattern: str = "**/*") -> str:
         """
-        Compute content hash of a directory by hashing all file contents.
-        
+        Compute content hash of files matching a pattern in a directory.
+
         Args:
-            dir_path: Path to directory to hash
-            
+            dir_path: Path to directory to search in
+            pattern: Glob pattern for files to include (default: all files)
+
         Returns:
-            SHA256 hash of directory contents
+            SHA256 hash of matching file contents
         """
         hasher = hashlib.sha256()
-        
-        # Get all files recursively, sorted for consistency
-        files = sorted(dir_path.rglob("*"))
+
+        # Get matching files, sorted for consistency
+        files = sorted(dir_path.glob(pattern))
         for file_path in files:
             if file_path.is_file():
                 # Include relative path and content in hash
@@ -161,7 +141,7 @@ class RunCache:
                 except (IOError, OSError):
                     # Skip files that can't be read
                     pass
-        
+
         return hasher.hexdigest()
 
     @staticmethod

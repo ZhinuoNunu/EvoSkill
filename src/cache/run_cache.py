@@ -7,6 +7,7 @@ Cache invalidates automatically when .claude/ directory content changes
 
 import hashlib
 import json
+import logging
 import shutil
 import subprocess
 from datetime import datetime
@@ -16,6 +17,8 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from src.agent_profiles.base import AgentTrace
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -83,11 +86,14 @@ class RunCache:
         regardless of which branch/commit. Captures both skills/config
         in .claude/ and prompt text in src/agent_profiles/base_agent/.
 
+        First tries to get hash from HEAD (committed state), but falls back
+        to computing hash from working directory if paths don't exist in HEAD.
+
         Returns:
             Combined hash of both directory trees.
 
         Raises:
-            RuntimeError: If git command fails.
+            RuntimeError: If git command fails and fallback also fails.
         """
         paths = [
             ".claude/",
@@ -95,6 +101,9 @@ class RunCache:
         ]
 
         tree_hashes = []
+        use_working_dir = False
+        
+        # Try to get tree hashes from HEAD first
         for path in paths:
             try:
                 result = subprocess.run(
@@ -105,14 +114,55 @@ class RunCache:
                     check=True,
                 )
                 tree_hashes.append(result.stdout.strip())
-            except subprocess.CalledProcessError as e:
-                raise RuntimeError(
-                    f"Failed to get git tree hash for {path}: {e.stderr}"
-                ) from e
+            except subprocess.CalledProcessError:
+                # Path doesn't exist in HEAD, will use working directory fallback
+                use_working_dir = True
+                break
+
+        # If paths don't exist in HEAD, compute hash from working directory
+        if use_working_dir:
+            tree_hashes = []
+            for path in paths:
+                dir_path = self.config.cwd / path
+                if dir_path.exists():
+                    # Compute hash of directory contents
+                    dir_hash = self._hash_directory(dir_path)
+                    tree_hashes.append(dir_hash)
+                else:
+                    # Empty hash for non-existent directory
+                    tree_hashes.append("")
 
         # Combine tree hashes into a single hash
         combined = ":".join(tree_hashes)
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+    def _hash_directory(self, dir_path: Path) -> str:
+        """
+        Compute content hash of a directory by hashing all file contents.
+        
+        Args:
+            dir_path: Path to directory to hash
+            
+        Returns:
+            SHA256 hash of directory contents
+        """
+        hasher = hashlib.sha256()
+        
+        # Get all files recursively, sorted for consistency
+        files = sorted(dir_path.rglob("*"))
+        for file_path in files:
+            if file_path.is_file():
+                # Include relative path and content in hash
+                rel_path = file_path.relative_to(dir_path)
+                hasher.update(str(rel_path).encode("utf-8"))
+                try:
+                    with open(file_path, "rb") as f:
+                        hasher.update(f.read())
+                except (IOError, OSError):
+                    # Skip files that can't be read
+                    pass
+        
+        return hasher.hexdigest()
 
     @staticmethod
     def _compute_question_hash(question: str) -> str:
@@ -149,7 +199,8 @@ class RunCache:
 
         try:
             tree_hash = self._get_tree_hash()
-        except RuntimeError:
+        except RuntimeError as e:
+            logger.debug(f"Cache get failed to compute tree hash: {e}")
             return None
 
         cache_path = self._get_cache_path(tree_hash, question)
@@ -194,7 +245,8 @@ class RunCache:
 
         try:
             tree_hash = self._get_tree_hash()
-        except RuntimeError:
+        except RuntimeError as e:
+            logger.debug(f"Cache set failed to compute tree hash: {e}")
             return
 
         tree_dir = self._get_cache_dir_for_tree(tree_hash)

@@ -92,15 +92,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue from existing frontier/branch instead of starting fresh",
     )
-<<<<<<< Updated upstream
-=======
-    parser.add_argument(
-        "--sample-seed",
-        type=int,
-        default=None,
-        help="Seed for random sample selection (default: None = sequential)",
-    )
->>>>>>> Stashed changes
     # Training composition
     parser.add_argument(
         "--train-easy-count",

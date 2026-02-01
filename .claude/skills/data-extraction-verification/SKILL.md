@@ -19,6 +19,35 @@ Before extracting ANY value, explicitly document:
    - "Calendar year average" ≠ "Specific month value"
    - "Regional aggregate" ≠ "Individual country"
 
+5. **Semantic definition verification** (MANDATORY before any extraction):
+
+   Before extracting, explicitly define BOTH what the question asks for AND what the column measures:
+
+   a) **Question semantic**: What does the question ask for?
+      - "Sales and redemptions" = FLOWS (new issuances + redemptions in a period)
+      - "Amount outstanding" = STOCK (cumulative balance at a point in time)
+      - "Specific month value" = exact value for that month
+      - "Annual average" = mean of 12 monthly values
+
+   b) **Column semantic**: What does the column header actually measure?
+      - Read column header exactly as written
+      - Define what that metric type represents
+
+   c) **Semantic match verification**:
+      - Do the semantics match? Answer YES or NO explicitly
+      - If NO: STOP. Find the correct column.
+      - If uncertain: STOP. Re-read table structure.
+
+   Common semantic confusions to guard against:
+   | Question asks for | WRONG column | RIGHT column |
+   |-------------------|--------------|--------------|
+   | Sales and redemptions | Amount outstanding | Sales OR Redemptions columns |
+   | Specific month value | Annual average | Monthly data row |
+   | Individual country | Regional aggregate | Country-specific row |
+   | Flow (period total) | Stock (point-in-time balance) | Period totals column |
+
+⚠️ **STOP CONDITION**: If semantic match verification fails, DO NOT proceed with extraction. Re-examine the table to find the column that semantically matches the question's requirement.
+
 ## Extraction: Cell Verification
 
 When reading the value:
@@ -46,13 +75,15 @@ After extraction:
 ## Data Extraction Verification
 Table: [exact table name]
 Target Metric: [what question asks for]
+Question Semantic: [FLOW/STOCK/POINT-VALUE/AVERAGE - define what's requested]
 Column Selected: [exact column header]
+Column Semantic: [FLOW/STOCK/POINT-VALUE/AVERAGE - define what column measures]
+SEMANTIC MATCH: [YES/NO - explicit verification]
 Row Selected: [exact row label]
 Extracted Value: [value with units]
 Adjacent Context:
   - Row above: [value]
   - Row below: [value]
-Metric Match Confirmed: [yes/no - does column measure what question asks?]
 Cross-Verification: [how verified - totals, re-read, alternative source]
 ```
 

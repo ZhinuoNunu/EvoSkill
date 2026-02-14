@@ -4,7 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Callable, Generic, TypeVar
 
 from src.agent_profiles.base import Agent, AgentTrace
 from src.cache import RunCache, CacheConfig
@@ -116,6 +116,7 @@ class SelfImprovingLoop:
         manager: ProgramManager,
         train_pools: dict[str, list[tuple[str, str]]],
         val_data: list[tuple[str, str, str]],
+        scorer: Callable[[str, str], float] | None = None,
     ):
         """Initialize the self-improving loop.
 
@@ -125,12 +126,15 @@ class SelfImprovingLoop:
             manager: ProgramManager for git-based versioning.
             train_pools: Dict mapping category -> list of (question, answer) tuples.
             val_data: Validation data as list of (question, answer, category) tuples.
+            scorer: Scoring function (predicted, ground_truth) -> float.
+                    Defaults to _score_multi_tolerance for backward compatibility.
         """
         self.config = config
         self.agents = agents
         self.manager = manager
         self.train_pools = train_pools
         self.val_data = val_data
+        self.scorer = scorer or _score_multi_tolerance
 
         # Round-robin sampling state
         self._category_offset = 0  # Which category to start with next iteration
@@ -288,7 +292,7 @@ class SelfImprovingLoop:
                 agent_answer = (
                     trace.output.final_answer if trace.output else "[PARSE FAILED]"
                 )
-                avg_score = _score_multi_tolerance(
+                avg_score = self.scorer(
                     agent_answer.strip().lower(),
                     answer.strip().lower(),
                 )
@@ -425,7 +429,7 @@ class SelfImprovingLoop:
         for result in results:
             if result.trace is None or result.trace.output is None:
                 continue  # Timeout/error/parse failed = 0 score
-            score += _score_multi_tolerance(
+            score += self.scorer(
                 result.trace.output.final_answer,
                 result.ground_truth,
             )

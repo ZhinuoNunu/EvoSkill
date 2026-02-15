@@ -12,13 +12,6 @@ from src.evaluation.sealqa_scorer import score_sealqa
 from src.schemas import AgentResponse
 
 
-PROMPT = """You are an expert web research agent. Answer the following factoid question by searching the web for up-to-date information.
-
-Here is the question you need to answer:
-{question}
-"""
-
-
 async def main():
     parser = argparse.ArgumentParser(description="Evaluate agent on SEAL-QA dataset")
     parser.add_argument(
@@ -83,11 +76,12 @@ async def main():
 
     print(f"Dataset: {len(data)} samples (topic={args.topic})")
 
-    # Prepare items: (index, formatted_prompt, answer)
+    # Prepare items: (index, question, answer)
+    # System prompt is loaded from prompt.txt via the agent options factory
     items = [
         (
             idx,
-            PROMPT.format(question=row["question"]),
+            row["question"],
             row["answer"],
         )
         for idx, row in data.iterrows()
@@ -117,7 +111,7 @@ async def main():
     correct = 0
     for r in successful:
         if r.trace and r.trace.output and r.trace.output.final_answer:
-            score = score_sealqa(str(r.ground_truth), str(r.trace.output.final_answer))
+            score = score_sealqa(r.question, str(r.ground_truth), str(r.trace.output.final_answer))
             if score > 0:
                 correct += 1
 

@@ -25,7 +25,7 @@ def _log(phase: str, message: str = "", indent: int = 0) -> None:
         print(f"{prefix}{message}")
 
 
-def _score_multi_tolerance(predicted: str, ground_truth: str) -> float:
+def _score_multi_tolerance(question: str, predicted: str, ground_truth: str) -> float:
     """Score answer using weighted average across tolerance levels.
 
     Weights favor stricter tolerances: weight = 1 / (1 + 20 * tolerance)
@@ -116,7 +116,7 @@ class SelfImprovingLoop:
         manager: ProgramManager,
         train_pools: dict[str, list[tuple[str, str]]],
         val_data: list[tuple[str, str, str]],
-        scorer: Callable[[str, str], float] | None = None,
+        scorer: Callable[[str, str, str], float] | None = None,
     ):
         """Initialize the self-improving loop.
 
@@ -126,7 +126,7 @@ class SelfImprovingLoop:
             manager: ProgramManager for git-based versioning.
             train_pools: Dict mapping category -> list of (question, answer) tuples.
             val_data: Validation data as list of (question, answer, category) tuples.
-            scorer: Scoring function (predicted, ground_truth) -> float.
+            scorer: Scoring function (question, predicted, ground_truth) -> float.
                     Defaults to _score_multi_tolerance for backward compatibility.
         """
         self.config = config
@@ -293,6 +293,7 @@ class SelfImprovingLoop:
                     trace.output.final_answer if trace.output else "[PARSE FAILED]"
                 )
                 avg_score = self.scorer(
+                    question,
                     agent_answer.strip().lower(),
                     answer.strip().lower(),
                 )
@@ -430,6 +431,7 @@ class SelfImprovingLoop:
             if result.trace is None or result.trace.output is None:
                 continue  # Timeout/error/parse failed = 0 score
             score += self.scorer(
+                result.question,
                 result.trace.output.final_answer,
                 result.ground_truth,
             )

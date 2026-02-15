@@ -69,9 +69,9 @@ def stratified_split(
     return train_pools, val_data
 
 
-def _sealqa_scorer(predicted: str, ground_truth: str) -> float:
-    """Wrapper around score_sealqa matching the (predicted, ground_truth) signature."""
-    return score_sealqa(ground_truth, predicted)
+def _sealqa_scorer(question: str, predicted: str, ground_truth: str) -> float:
+    """Wrapper around score_sealqa matching the runner's (question, predicted, ground_truth) signature."""
+    return score_sealqa(question, ground_truth, predicted)
 
 
 def parse_args() -> argparse.Namespace:

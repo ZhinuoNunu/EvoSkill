@@ -25,3 +25,5 @@ DABstep-data/
 .cache/
 *.txt
 output.txt
+tests/
+scratch/

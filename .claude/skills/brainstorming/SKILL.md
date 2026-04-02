@@ -99,6 +99,12 @@ Before outputting, check:
 2. Value in reasonable magnitude range?
 3. Formula actually computed (not just numerator)?
 4. Answer addresses exactly what was asked?
+5. **Numeric Output Format** (if answer is numeric):
+   - If question asks for a number/value/amount without explicitly requesting units → output ONLY digits
+   - Remove: "million", "billion", "dollars", "$", "%" unless specifically requested
+   - Examples:
+     - Question: "What were total expenditures?" (context: in millions) → Answer: `507` NOT `507 million`
+     - Question: "What was the amount?" → Answer: `507` NOT `507 dollars`
 
 If ANY check fails → re-verify inputs and calculation.
 

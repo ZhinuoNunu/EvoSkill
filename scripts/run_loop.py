@@ -70,7 +70,14 @@ class LoopSettings(BaseSettings):
     )
     dataset: str = Field(
         default=".dataset/new_runs_base/solved_dataset.csv",
-        description="Path to dataset CSV with category column",
+        description=(
+            "CSV with question + (ground_truth or answer); "
+            "category optional (uses difficulty if present, else 'default')"
+        ),
+    )
+    num_samples: Optional[int] = Field(
+        default=None,
+        description="Use only the first N rows after loading (smoke tests)",
     )
     train_ratio: float = Field(
         default=0.18, description="Fraction of each category for training"
@@ -88,6 +95,28 @@ class LoopSettings(BaseSettings):
         default="claude",
         description="SDK to use: 'claude' or 'opencode'",
     )
+
+
+def normalize_dataset_for_loop(data: pd.DataFrame) -> pd.DataFrame:
+    """Ensure question, ground_truth, category for stratified_split."""
+    df = data.copy()
+    if "question" not in df.columns:
+        raise ValueError(
+            f"Dataset must have 'question' column (found: {list(df.columns)!r})"
+        )
+    if "ground_truth" not in df.columns:
+        if "answer" in df.columns:
+            df["ground_truth"] = df["answer"]
+        else:
+            raise ValueError(
+                f"Dataset needs 'ground_truth' or 'answer' (found: {list(df.columns)!r})"
+            )
+    if "category" not in df.columns:
+        if "difficulty" in df.columns:
+            df["category"] = df["difficulty"].astype(str)
+        else:
+            df["category"] = "default"
+    return df
 
 
 def stratified_split(
@@ -117,10 +146,22 @@ def stratified_split(
 
     for cat in categories:
         cat_data = data[data["category"] == cat].sample(frac=1, random_state=42)
-        n_train = max(1, int(len(cat_data) * train_ratio))
-        n_val = max(1, int(len(cat_data) * val_ratio))
+        n = len(cat_data)
+        if n == 0:
+            continue
+        if n == 1:
+            row = cat_data.iloc[0]
+            train_pools[cat] = [(row.question, row.ground_truth)]
+            val_data.append((row.question, row.ground_truth, cat))
+            continue
 
-        # Train comes first, then validation
+        n_train = max(1, int(n * train_ratio))
+        n_val = max(1, int(n * val_ratio))
+        if n_train + n_val > n:
+            n_val = max(1, n - n_train)
+            if n_train + n_val > n:
+                n_train = n - n_val
+
         train_pools[cat] = [
             (row.question, row.ground_truth)
             for _, row in cat_data.head(n_train).iterrows()
@@ -140,16 +181,18 @@ async def main(settings: LoopSettings):
     set_sdk(settings.sdk)
 
     data = pd.read_csv(settings.dataset)
+    data = normalize_dataset_for_loop(data)
+    if settings.num_samples is not None:
+        data = data.head(settings.num_samples)
 
-    # Stratified split by category
     train_pools, val_data = stratified_split(
         data, train_ratio=settings.train_ratio, val_ratio=settings.val_ratio
     )
 
-    # Print category distribution
     categories = list(train_pools.keys())
     total_train = sum(len(pool) for pool in train_pools.values())
-    print(f"Dataset: {settings.dataset}")
+    ds_note = f" (head {settings.num_samples})" if settings.num_samples else ""
+    print(f"Dataset: {settings.dataset}{ds_note}")
     print(f"Categories ({len(categories)}): {', '.join(categories)}")
     print(
         f"Training pools: {', '.join(f'{cat}: {len(pool)}' for cat, pool in train_pools.items())}"

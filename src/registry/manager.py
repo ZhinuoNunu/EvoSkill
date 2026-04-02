@@ -431,7 +431,13 @@ class ProgramManager:
             self._run_git(["stash", "pop"], check=False)
 
     def _git_checkout_new(self, branch: str) -> None:
-        """Create and checkout a new branch."""
+        """Create and checkout a new branch.
+
+        If the branch already exists locally (e.g. previous loop run), delete it
+        first so ``git checkout -b`` does not fail with exit 128.
+        """
+        if branch in self._git_list_branches():
+            self._run_git(["branch", "-D", branch])
         self._run_git(["checkout", "-b", branch])
 
     def _git_current_branch(self) -> str:

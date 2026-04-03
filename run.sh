@@ -13,6 +13,6 @@ uv run python scripts/run_loop.py \
   --mode skill_only \
   --max_iterations 3 \
   --concurrency 1 \
-  --dataset ".dataset/officeqa_full.csv" \
-  --num_samples 1 \
+  --train_dataset ".dataset/officeqa_easy_train.csv" \
+  --val_dataset ".dataset/officeqa_easy_val.csv" \
   "$@"

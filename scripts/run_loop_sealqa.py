@@ -132,20 +132,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=str,
-        default=".dataset/seal-0.csv",
-        help="Path to SEAL-QA CSV (default: .dataset/seal-0.csv)",
+        default=None,
+        help="Path to SEAL-QA CSV for ratio-based splitting (ignored when --train-dataset and --val-dataset are both set)",
+    )
+    parser.add_argument(
+        "--train-dataset",
+        type=str,
+        default=None,
+        help="Path to pre-split training CSV",
+    )
+    parser.add_argument(
+        "--val-dataset",
+        type=str,
+        default=None,
+        help="Path to pre-split validation CSV",
     )
     parser.add_argument(
         "--train-ratio",
         type=float,
         default=0.18,
-        help="Fraction of each category for training (default: 0.18)",
+        help="Fraction of each category for training (only used with --dataset, default: 0.18)",
     )
     parser.add_argument(
         "--val-ratio",
         type=float,
         default=0.12,
-        help="Fraction of each category for validation (default: 0.12)",
+        help="Fraction of each category for validation (only used with --dataset, default: 0.12)",
     )
     parser.add_argument(
         "--model",
@@ -157,24 +169,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_sealqa(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename SEAL-QA columns to match stratified_split expectations."""
+    df = df.copy()
+    if "topic" in df.columns and "category" not in df.columns:
+        df.rename(columns={"topic": "category"}, inplace=True)
+    if "answer" in df.columns and "ground_truth" not in df.columns:
+        df.rename(columns={"answer": "ground_truth"}, inplace=True)
+    return df
+
+
+def load_separate_datasets(
+    train_path: str,
+    val_path: str,
+) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str]]]:
+    """Load pre-split train/val CSVs into the formats expected by SelfImprovingLoop."""
+    train_df = normalize_sealqa(pd.read_csv(train_path))
+    val_df = normalize_sealqa(pd.read_csv(val_path))
+
+    train_pools: dict[str, list[tuple[str, str]]] = {}
+    for cat in train_df["category"].dropna().unique():
+        cat_rows = train_df[train_df["category"] == cat]
+        train_pools[cat] = [
+            (row.question, row.ground_truth) for _, row in cat_rows.iterrows()
+        ]
+
+    val_data: list[tuple[str, str, str]] = [
+        (row.question, row.ground_truth, row.category)
+        for _, row in val_df.dropna(subset=["category"]).iterrows()
+    ]
+
+    return train_pools, val_data
+
+
 async def main(args: argparse.Namespace):
-    data = pd.read_csv(args.dataset)
+    if args.train_dataset and args.val_dataset:
+        train_pools, val_data = load_separate_datasets(
+            args.train_dataset, args.val_dataset
+        )
+        print(f"Train dataset: {args.train_dataset}")
+        print(f"Val dataset:   {args.val_dataset}")
+    elif args.dataset:
+        data = pd.read_csv(args.dataset)
+        data = normalize_sealqa(data)
+        train_pools, val_data = stratified_split(
+            data, train_ratio=args.train_ratio, val_ratio=args.val_ratio
+        )
+        print(f"Dataset: {args.dataset}")
+        print(
+            f"Split ratios: train={args.train_ratio:.0%}, val={args.val_ratio:.0%} "
+            f"(remaining {1-args.train_ratio-args.val_ratio:.0%} unused)"
+        )
+    else:
+        raise ValueError(
+            "Must provide either --train-dataset and --val-dataset, or --dataset"
+        )
 
-    # Rename SEAL-QA columns to match stratified_split expectations
-    data.rename(columns={"topic": "category", "answer": "ground_truth"}, inplace=True)
-
-    # Stratified split by category
-    train_pools, val_data = stratified_split(data, train_ratio=args.train_ratio, val_ratio=args.val_ratio)
-
-    # Print category distribution
     categories = list(train_pools.keys())
     total_train = sum(len(pool) for pool in train_pools.values())
-    print(f"Dataset: {args.dataset}")
     print(f"Categories ({len(categories)}): {', '.join(categories)}")
     print(f"Training pools: {', '.join(f'{cat}: {len(pool)}' for cat, pool in train_pools.items())}")
     print(f"Total training samples: {total_train}")
-    print(f"Validation samples: {len(val_data)} ({args.val_ratio:.0%} per category, min 1 each)")
-    print(f"Split ratios: train={args.train_ratio:.0%}, val={args.val_ratio:.0%} (remaining {1-args.train_ratio-args.val_ratio:.0%} unused)")
+    print(f"Validation samples: {len(val_data)}")
 
     # Use custom model for sealqa agent if specified
     base_options = make_sealqa_agent_options(model=args.model) if args.model else sealqa_agent_options

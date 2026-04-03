@@ -68,22 +68,32 @@ class LoopSettings(BaseSettings):
         default=False,
         description="Continue from existing frontier/branch instead of starting fresh",
     )
-    dataset: str = Field(
-        default=".dataset/new_runs_base/solved_dataset.csv",
+    dataset: Optional[str] = Field(
+        default=None,
         description=(
             "CSV with question + (ground_truth or answer); "
-            "category optional (uses difficulty if present, else 'default')"
+            "category optional (uses difficulty if present, else 'default'). "
+            "Used with train_ratio/val_ratio for ratio-based splitting. "
+            "Ignored when train_dataset and val_dataset are both provided."
         ),
+    )
+    train_dataset: Optional[str] = Field(
+        default=None,
+        description="Path to training CSV (question, ground_truth/answer, category/difficulty)",
+    )
+    val_dataset: Optional[str] = Field(
+        default=None,
+        description="Path to validation CSV (question, ground_truth/answer, category/difficulty)",
     )
     num_samples: Optional[int] = Field(
         default=None,
         description="Use only the first N rows after loading (smoke tests)",
     )
     train_ratio: float = Field(
-        default=0.18, description="Fraction of each category for training"
+        default=0.18, description="Fraction of each category for training (only used with --dataset)"
     )
     val_ratio: float = Field(
-        default=0.12, description="Fraction of each category for validation"
+        default=0.12, description="Fraction of each category for validation (only used with --dataset)"
     )
     val_count: Optional[int] = Field(
         default=None, description="Override total validation count"
@@ -176,34 +186,73 @@ def stratified_split(
     return train_pools, val_data
 
 
+def load_separate_datasets(
+    train_path: str,
+    val_path: str,
+    num_samples: Optional[int] = None,
+) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, str, str]]]:
+    """Load pre-split train/val CSVs into the formats expected by SelfImprovingLoop."""
+    train_df = normalize_dataset_for_loop(pd.read_csv(train_path))
+    val_df = normalize_dataset_for_loop(pd.read_csv(val_path))
+
+    if num_samples is not None:
+        train_df = train_df.head(num_samples)
+        val_df = val_df.head(num_samples)
+
+    train_pools: dict[str, list[tuple[str, str]]] = {}
+    for cat in train_df["category"].dropna().unique():
+        cat_rows = train_df[train_df["category"] == cat]
+        train_pools[cat] = [
+            (row.question, row.ground_truth) for _, row in cat_rows.iterrows()
+        ]
+
+    val_data: list[tuple[str, str, str]] = [
+        (row.question, row.ground_truth, row.category)
+        for _, row in val_df.dropna(subset=["category"]).iterrows()
+    ]
+
+    return train_pools, val_data
+
+
 async def main(settings: LoopSettings):
     # Set SDK based on CLI argument
     set_sdk(settings.sdk)
 
-    data = pd.read_csv(settings.dataset)
-    data = normalize_dataset_for_loop(data)
-    if settings.num_samples is not None:
-        data = data.head(settings.num_samples)
-
-    train_pools, val_data = stratified_split(
-        data, train_ratio=settings.train_ratio, val_ratio=settings.val_ratio
-    )
+    if settings.train_dataset and settings.val_dataset:
+        train_pools, val_data = load_separate_datasets(
+            settings.train_dataset,
+            settings.val_dataset,
+            num_samples=settings.num_samples,
+        )
+        ds_note = f" (head {settings.num_samples})" if settings.num_samples else ""
+        print(f"Train dataset: {settings.train_dataset}{ds_note}")
+        print(f"Val dataset:   {settings.val_dataset}{ds_note}")
+    elif settings.dataset:
+        data = pd.read_csv(settings.dataset)
+        data = normalize_dataset_for_loop(data)
+        if settings.num_samples is not None:
+            data = data.head(settings.num_samples)
+        train_pools, val_data = stratified_split(
+            data, train_ratio=settings.train_ratio, val_ratio=settings.val_ratio
+        )
+        ds_note = f" (head {settings.num_samples})" if settings.num_samples else ""
+        print(f"Dataset: {settings.dataset}{ds_note}")
+        print(
+            f"Split ratios: train={settings.train_ratio:.0%}, val={settings.val_ratio:.0%} (remaining {1 - settings.train_ratio - settings.val_ratio:.0%} unused)"
+        )
+    else:
+        raise ValueError(
+            "Must provide either --train_dataset and --val_dataset, or --dataset"
+        )
 
     categories = list(train_pools.keys())
     total_train = sum(len(pool) for pool in train_pools.values())
-    ds_note = f" (head {settings.num_samples})" if settings.num_samples else ""
-    print(f"Dataset: {settings.dataset}{ds_note}")
     print(f"Categories ({len(categories)}): {', '.join(categories)}")
     print(
         f"Training pools: {', '.join(f'{cat}: {len(pool)}' for cat, pool in train_pools.items())}"
     )
     print(f"Total training samples: {total_train}")
-    print(
-        f"Validation samples: {len(val_data)} ({settings.val_ratio:.0%} per category, min 1 each)"
-    )
-    print(
-        f"Split ratios: train={settings.train_ratio:.0%}, val={settings.val_ratio:.0%} (remaining {1 - settings.train_ratio - settings.val_ratio:.0%} unused)"
-    )
+    print(f"Validation samples: {len(val_data)}")
 
     # Use custom model for base agent if specified
     base_options = (

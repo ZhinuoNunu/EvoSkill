@@ -437,6 +437,8 @@ class ProgramManager:
         first so ``git checkout -b`` does not fail with exit 128.
         """
         if branch in self._git_list_branches():
+            if self._git_current_branch() == branch:
+                self._run_git(["checkout", "main"])
             self._run_git(["branch", "-D", branch])
         self._run_git(["checkout", "-b", branch])
 

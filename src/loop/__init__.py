@@ -24,6 +24,15 @@ Example usage:
 """
 
 from .config import LoopConfig
-from .runner import SelfImprovingLoop, LoopAgents, LoopResult
+from .helpers import SuccessInfo
+from .runner import SelfImprovingLoop, LoopAgents, LoopResult, EvalMetrics, efficiency_bonus
 
-__all__ = ["SelfImprovingLoop", "LoopConfig", "LoopAgents", "LoopResult"]
+__all__ = [
+    "SelfImprovingLoop",
+    "LoopConfig",
+    "LoopAgents",
+    "LoopResult",
+    "EvalMetrics",
+    "SuccessInfo",
+    "efficiency_bonus",
+]

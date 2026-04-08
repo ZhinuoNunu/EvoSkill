@@ -61,6 +61,7 @@ from src.schemas import (
 
 from .config import LoopConfig
 from .helpers import (
+    SuccessInfo,
     build_proposer_query,
     build_skill_query,
     build_prompt_query,
@@ -75,6 +76,33 @@ from .helpers import (
 T = TypeVar("T")
 
 TOLERANCE_LEVELS = [0.05, 0.01, 0.1, 0.0, 0.025]
+
+
+@dataclass
+class EvalMetrics:
+    """Dual evaluation metrics: raw accuracy and efficiency-aware score."""
+    raw_accuracy: float
+    efficiency_score: float
+    avg_success_turns: float
+    total_questions: int
+    correct_count: int
+
+
+def efficiency_bonus(num_turns: int, base: float = 0.7, bonus: float = 0.3,
+                     ideal_turns: int = 3, max_turns: int = 25) -> float:
+    """Efficiency-aware score for correct answers (Scheme C).
+
+    Correct answers get at least `base` points, plus a `bonus` that
+    decreases linearly as num_turns grows from ideal_turns to max_turns.
+    Returns a value in [base, base + bonus].
+    """
+    if num_turns <= ideal_turns:
+        return base + bonus
+    elif num_turns >= max_turns:
+        return base
+    else:
+        ratio = (max_turns - num_turns) / (max_turns - ideal_turns)
+        return base + bonus * ratio
 
 
 @dataclass
@@ -286,8 +314,9 @@ class SelfImprovingLoop:
                 self.agents.base.run(question) for question, _, _ in test_samples
             ])
 
-            # Collect failures
-            failures: list[tuple[AgentTrace, str, str, str]] = []  # (trace, agent_answer, ground_truth, category)
+            # Collect failures and success metadata
+            failures: list[tuple[AgentTrace, str, str, str]] = []
+            successes: list[SuccessInfo] = []
             for trace, (question, answer, category) in zip(traces, test_samples):
                 agent_answer = (
                     trace.output.final_answer if trace.output else "[PARSE FAILED]"
@@ -297,9 +326,17 @@ class SelfImprovingLoop:
                     agent_answer.strip().lower(),
                     answer.strip().lower(),
                 )
-                status = "[OK]" if avg_score >= 0.8 else "[FAIL]"
-                _log("", f"    {status} [{category}] {question[:40]}...")
-                if avg_score < 0.8:
+                if avg_score >= 0.8:
+                    _log("", f"    [OK] [{category}] {question[:40]}... (turns={trace.num_turns})")
+                    successes.append(SuccessInfo(
+                        category=category,
+                        num_turns=trace.num_turns,
+                        duration_ms=trace.duration_ms,
+                        tools_used=trace.tools,
+                        score=avg_score,
+                    ))
+                else:
+                    _log("", f"    [FAIL] [{category}] {question[:40]}...")
                     failures.append((trace, agent_answer, answer, category))
 
             # Always propose if any failures exist
@@ -315,8 +352,8 @@ class SelfImprovingLoop:
                 0.0
             )
 
-            # Run proposer with all failures (use actual iteration number with offset)
-            mutation_result = await self._mutate_with_fallback(parent, failures, actual_iteration)
+            # Run proposer with all failures + success metadata (use actual iteration number with offset)
+            mutation_result = await self._mutate_with_fallback(parent, failures, actual_iteration, successes)
 
             if mutation_result is None:
                 no_improvement_count += 1
@@ -325,9 +362,15 @@ class SelfImprovingLoop:
 
                 # Evaluate child
                 _log("", f"  -> Evaluating {child_name}...")
-                child_score = await self._evaluate(self.val_data)
+                child_metrics = await self._evaluate(self.val_data)
+                child_score = child_metrics.efficiency_score
 
-                # Update frontier or discard
+                _log("", f"  [METRICS] Raw Accuracy: {child_metrics.raw_accuracy:.4f} "
+                     f"({child_metrics.correct_count}/{child_metrics.total_questions}) | "
+                     f"Efficiency Score: {child_score:.4f} | "
+                     f"Avg Turns (success): {child_metrics.avg_success_turns:.1f}")
+
+                # Update frontier or discard (using efficiency score)
                 added = self.manager.update_frontier(
                     child_name, child_score, max_size=self.config.frontier_size
                 )
@@ -353,6 +396,8 @@ class SelfImprovingLoop:
                     score=child_score,
                     parent_score=parent_score,
                     active_skills=active_skills,
+                    raw_accuracy=child_metrics.raw_accuracy,
+                    avg_success_turns=child_metrics.avg_success_turns,
                 )
 
             # Check early stopping
@@ -404,38 +449,58 @@ class SelfImprovingLoop:
         # Evaluate and add base to frontier
         self.manager.switch_to("base")
         _log("", f"  -> Evaluating on {len(self.val_data)} samples...")
-        base_score = await self._evaluate(self.val_data)
+        base_metrics = await self._evaluate(self.val_data)
+        base_score = base_metrics.efficiency_score
         self.manager.update_frontier(
             "base", base_score, max_size=self.config.frontier_size
         )
-        _log("", f"  -> Base score: {base_score:.4f}")
+        _log("", f"  -> Base: efficiency_score={base_score:.4f}, raw_accuracy={base_metrics.raw_accuracy:.4f}, "
+             f"avg_turns={base_metrics.avg_success_turns:.1f}")
         _log("", f"  -> Frontier: {self.manager.get_frontier()}")
 
-    async def _evaluate(self, data: list[tuple[str, str, str]]) -> float:
-        """Evaluate base agent on data.
+    async def _evaluate(self, data: list[tuple[str, str, str]]) -> EvalMetrics:
+        """Evaluate base agent on data with efficiency-aware scoring.
 
         Args:
             data: List of (question, answer, category) tuples.
 
         Returns:
-            Accuracy score (0.0 to 1.0).
+            EvalMetrics containing both raw accuracy and efficiency-aware score.
         """
-        # Convert to (question, answer) format for evaluate_agent_parallel
         qa_data = [(q, a) for q, a, _ in data]
         results = await evaluate_agent_parallel(
             self.agents.base, qa_data, max_concurrent=self.config.concurrency, cache=self.cache
         )
 
-        score = 0.0
+        raw_correct = 0
+        eff_score_sum = 0.0
+        success_turns: list[int] = []
+
         for result in results:
             if result.trace is None or result.trace.output is None:
-                continue  # Timeout/error/parse failed = 0 score
-            score += self.scorer(
+                continue
+            correctness = self.scorer(
                 result.question,
                 result.trace.output.final_answer,
                 result.ground_truth,
             )
-        return score / len(results)
+            if correctness > 0:
+                raw_correct += 1
+                eff_score_sum += efficiency_bonus(result.trace.num_turns)
+                success_turns.append(result.trace.num_turns)
+
+        n = len(results)
+        raw_accuracy = raw_correct / n if n > 0 else 0.0
+        eff_score = eff_score_sum / n if n > 0 else 0.0
+        avg_turns = sum(success_turns) / len(success_turns) if success_turns else 0.0
+
+        return EvalMetrics(
+            raw_accuracy=raw_accuracy,
+            efficiency_score=eff_score,
+            avg_success_turns=avg_turns,
+            total_questions=n,
+            correct_count=raw_correct,
+        )
 
     async def _mutate(
         self,
@@ -443,6 +508,7 @@ class SelfImprovingLoop:
         failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],
         iteration: int,
         truncation_level: int = 0,
+        successes: list[SuccessInfo] | None = None,
     ) -> tuple[str, str, str] | None:
         """Run proposer and generator to create a mutation based on multiple failures.
 
@@ -451,6 +517,7 @@ class SelfImprovingLoop:
             failures: List of (trace, agent_answer, ground_truth, category) tuples from failed attempts.
             iteration: Current iteration number.
             truncation_level: Context reduction level (0=full, 1=moderate, 2=aggressive).
+            successes: Lightweight metadata from successful traces for contrastive analysis.
 
         Returns:
             Tuple of (child_name, proposal, justification) if created, None otherwise.
@@ -462,7 +529,7 @@ class SelfImprovingLoop:
         evolution_mode = self.config.evolution_mode
         _log("", f"  -> Running {evolution_mode.replace('_only', '')} proposer with {len(failures)} failures...")
         feedback_history = read_feedback_history(self._feedback_path)
-        proposer_query = build_proposer_query(failures, feedback_history, evolution_mode, truncation_level)
+        proposer_query = build_proposer_query(failures, feedback_history, evolution_mode, truncation_level, successes)
 
         if evolution_mode == "skill_only":
             proposer_trace = await self.agents.skill_proposer.run(proposer_query)
@@ -546,6 +613,7 @@ and modify it to add these capabilities. Preserve all existing content that is s
         parent: str,
         failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],
         iteration: int,
+        successes: list[SuccessInfo] | None = None,
     ) -> tuple[str, str, str] | None:
         """Try progressive truncation levels, then single-failure fallback.
 
@@ -553,6 +621,7 @@ and modify it to add these capabilities. Preserve all existing content that is s
             parent: Name of the parent program.
             failures: List of (trace, agent_answer, ground_truth, category) tuples.
             iteration: Current iteration number.
+            successes: Lightweight metadata from successful traces for contrastive analysis.
 
         Returns:
             Tuple of (child_name, proposal, justification) if created, None otherwise.
@@ -563,7 +632,7 @@ and modify it to add these capabilities. Preserve all existing content that is s
             if truncation_level > 0:
                 _log("", f"  -> Retrying with truncation level {truncation_level}...")
 
-            result = await self._mutate(parent, failures, iteration, truncation_level)
+            result = await self._mutate(parent, failures, iteration, truncation_level, successes)
             if result is not None:
                 return result
 
@@ -571,7 +640,7 @@ and modify it to add these capabilities. Preserve all existing content that is s
         if self.config.proposer_single_failure_fallback and len(failures) > 1:
             _log("", f"  -> All truncation levels failed, trying single-failure fallback...")
             single_failure = self._pick_shortest_failure(failures)
-            result = await self._mutate(parent, [single_failure], iteration, truncation_level=max_level)
+            result = await self._mutate(parent, [single_failure], iteration, truncation_level=max_level, successes=successes)
             if result is not None:
                 return result
 

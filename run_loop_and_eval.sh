@@ -12,7 +12,7 @@ uv run python scripts/run_loop.py \
   --sdk claude \
   --model claude-sonnet-4-6 \
   --mode skill_only \
-  --max_iterations 3 \
+  --max_iterations 10 \
   --concurrency 1 \
   --train_dataset ".dataset/officeqa_easy_train.csv" \
   --val_dataset ".dataset/officeqa_easy_val.csv"

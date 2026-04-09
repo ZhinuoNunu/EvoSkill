@@ -9,7 +9,10 @@ treasury_bulletins_parsed/
 *.skill
 *.log
 .claude/*
-# Claude Code config (ignore most, but track program state)
+# Allow program state and skills needed by evolution loop
+!.claude/program.yaml
+!.claude/skills/
+!.claude/skills/**
 results/
 DABstep-data/
 

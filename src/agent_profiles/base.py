@@ -111,7 +111,7 @@ class Agent(Generic[T]):
     """
 
     TIMEOUT_SECONDS = 1200  # 20 minutes
-    MAX_RETRIES = 3
+    MAX_RETRIES = 1
     INITIAL_BACKOFF = 30  # seconds
 
     def __init__(self, options: OptionsProvider, response_model: Type[T]):
